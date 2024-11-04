@@ -19,7 +19,7 @@ you can get a list of all current disks,
                  TOSHIBA_MQ01ABD100_000000000 (/dev/sdb): (1) active/idle
 ```
 
-put the identity string of target HDD like "TOSHIBA_MQ01ABD100_000000000" to /dev/hdwake.conf and everything is ready then.
+put the identity string of target HDD like "TOSHIBA_MQ01ABD100_000000000" to /etc/hdwake.conf and everything is ready then.
 
 
 ## Background
@@ -56,4 +56,4 @@ This daemon also handles /dev/sdx change by using unique identity strings for ea
 
 - Better documents.
 - Add Debian / OpenWRT package build.
-- More option for set defaults and limites varibles.
+- More option for set defaults and limits varibles.
