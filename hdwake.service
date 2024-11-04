@@ -1,0 +1,11 @@
+[Unit]
+Description=hdwake
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/hdwake run
+Restart=no
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
