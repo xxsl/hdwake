@@ -24,7 +24,7 @@
 
 #include "sgio.h"
 
-#define VER "0.0.3.0"
+#define VER "0.0.3.1"
 #define BUILDSTAMP ( __DATE__ " " __TIME__ )
 
 #define DEF_CONF_PATH   "/etc/hdwake.conf"
@@ -207,6 +207,7 @@ char * _get_hdd_identity(const char * dev_name) {
         args[3] = 1;    /* sector count */
         if (do_drive_cmd(fd, args, 0)) {
             logger("HDIO_DRIVE_CMD (ATA_OP_IDENTIFY) failed\n");
+            close(fd);
             return NULL;
         }
     }
@@ -232,6 +233,7 @@ char * _get_hdd_identity(const char * dev_name) {
     char * hddid = (char *) malloc(4096 * sizeof(char));
     snprintf(hddid, 4096, "%s_%s", model, serial);
 
+    close(fd);
     return hddid;
 }
 
