@@ -2,6 +2,20 @@
 
 #include <linux/types.h>
 
+/* WIN_SMART sub-commands: https://android.googlesource.com/platform/external/kernel-headers/+/121c365/original/linux/hdreg.h */
+#define SMART_READ_VALUES		0xD0
+#define SMART_READ_THRESHOLDS		0xD1
+#define SMART_AUTOSAVE			0xD2
+#define SMART_SAVE			0xD3
+#define SMART_IMMEDIATE_OFFLINE		0xD4
+#define SMART_READ_LOG_SECTOR		0xD5
+#define SMART_WRITE_LOG_SECTOR		0xD6
+#define SMART_WRITE_THRESHOLDS		0xD7
+#define SMART_ENABLE			0xD8
+#define SMART_DISABLE			0xD9
+#define SMART_STATUS			0xDA
+#define SMART_AUTO_OFFLINE		0xDB
+
 enum {
 	ATA_OP_DSM			= 0x06, // Data Set Management (TRIM)
 	ATA_OP_READ_PIO			= 0x20,
@@ -29,7 +43,7 @@ enum {
 	ATA_OP_PIDENTIFY		= 0xa1,
 	ATA_OP_READ_NATIVE_MAX		= 0xf8,
 	ATA_OP_READ_NATIVE_MAX_EXT	= 0x27,
-	ATA_OP_SMART			= 0xb0,
+	ATA_OP_SMART			= 0xb0, // WIN_SMART			0xB0: https://android.googlesource.com/platform/external/kernel-headers/+/121c365/original/linux/hdreg.h
 	ATA_OP_DCO			= 0xb1,
 	ATA_OP_ERASE_SECTORS		= 0xc0,
 	ATA_OP_READ_DMA			= 0xc8,

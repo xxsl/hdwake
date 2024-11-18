@@ -24,12 +24,13 @@
 
 #include "sgio.h"
 
-#define VER "0.0.3.1"
+#define VER "0.0.3.6"
 #define BUILDSTAMP ( __DATE__ " " __TIME__ )
 
 #define DEF_CONF_PATH   "/etc/hdwake.conf"
 #define DEF_DB_PATH     "/var/lib/hdwake/hdwake.db"
 #define DEF_LOCK_PATH     "/var/lib/hdwake/hdwake.lock"
+
 
 #define MAX_LINE_LENGTH 65536
 
@@ -38,15 +39,20 @@
 #define START_SERIAL            10  /* ASCII serial number */
 #define LENGTH_SERIAL           10  /* 10 words (20 bytes or characters) */
 
+
+
+
 struct ActiveDevice {
     char * hdd_identity;
     uint32_t wakeup_timer;
     int apm;
     int standby;
     uint8_t disabled;
-    struct ActiveDevice * _next; 
+    uint8_t enable_protect_lcc;
+    struct ActiveDevice * _next;
 
     uint64_t _actual_wakeup_count;
+    uint64_t _last_lcc;
 };
 
 struct IdentityMap {
@@ -235,6 +241,86 @@ char * _get_hdd_identity(const char * dev_name) {
 
     close(fd);
     return hddid;
+}
+
+uint8_t * _get_hdd_smart(const char * dev_name) {
+    char device[PATH_MAX];
+    snprintf(device, PATH_MAX, "/dev/%s", dev_name);
+
+    int fd = open(device, O_RDWR);
+    if (fd < 0) {
+        logger("failed to open (O_RDWR) the device: %s\n", device);
+        return NULL;
+    }
+
+    __u8 args[4+512];
+    memset(args, 0, sizeof(args));
+
+    // when SMART
+    // set in do_drive_cmd
+    // cdb[6] = 0x4F;                // LBA Mid (7:0), SMART-specific value
+    // cdb[7] = 0xC2;                // LBA High (7:0), SMART-specific value
+    args[0] = ATA_OP_SMART;         // command, ATA SMART command (0xB0)
+    args[1] = 0;                    // lbal, LBA Low (7:0), set to 0 for SMART
+    args[2] = SMART_READ_VALUES;    // feature, SMART subcommand (e.g., SMART_READ_DATA = 0xD0)
+    args[3] = 1;                    // nsect, Sector Count (7:0), set to 1 to read 512 bytes
+
+    if (do_drive_cmd(fd, args, 0)) {
+        logger("HDIO_DRIVE_CMD (ATA_OP_SMART_READ_DATA) failed\n");
+        close(fd);
+        return NULL;
+    }
+    close(fd);
+
+    // Bytes 0-1: SMART Status Flag
+
+    // Correct Structure of SMART Data Response (Modern Format)
+    // SMART data for attributes is typically stored in a buffer of 512 bytes. Each attribute occupies 12 bytes, and the attributes begin at offset 2 in the buffer.
+
+    // Offset   Length  Field           Description
+    // 0        1       Attribute ID    Unique ID for the attribute (e.g., 0xC1 for Load_Cycle_Count).
+    // 1-2      2       Attribute Flags Flags indicating status, criticality, etc. (little-endian).
+    // 3        1       Current Value   Normalized value (e.g., percentage).
+    // 4        1       Worst Value     Worst normalized value recorded.
+    // 5-10     6       Raw Value       Actual data for the attribute (little-endian).
+    // 11       1       Reserved        Reserved for future use.
+
+    uint8_t * smart_data = malloc(512 * sizeof(uint8_t));
+    memcpy(smart_data, args + 4, 512);
+    return smart_data;
+}
+
+uint64_t __parse_smart_raw_value(uint8_t * raw_data) {
+    uint64_t value_le = 0;
+    memcpy(&value_le, raw_data, 6);
+    return le64toh(value_le);
+}
+
+void hdd_get_ssc_lcc(const char * dev_name, uint64_t * out_ssc, uint64_t * out_lcc) {
+    uint8_t * smart_data = _get_hdd_smart(dev_name);
+
+    // ID#  ATTRIBUTE_NAME
+    //   4  Start_Stop_Count
+    // 193  Load_Cycle_Count
+
+    int offset = 2; // skip the first 2 bytes (SMART Status Flag)
+
+    uint64_t ssc = 0;
+    uint64_t lcc = 0;
+    while (offset + 12 <= 512) {
+        uint8_t attr_id = smart_data[offset];        // Attribute ID
+        if (attr_id == 4) { //   4  Start_Stop_Count
+            ssc = __parse_smart_raw_value(smart_data + offset + 5);
+        } else if (attr_id == 193) { // 193  Load_Cycle_Count
+            lcc = __parse_smart_raw_value(smart_data + offset + 5);
+        }
+        offset += 12;
+    }
+
+    free(smart_data);
+
+    if (out_ssc != NULL) *out_ssc = ssc;
+    if (out_lcc != NULL) *out_lcc = lcc;
 }
 
 int hdd_set_standby(const char * dev_name, int standby) {
@@ -432,7 +518,12 @@ void identity_print() {
         char curr_powermode_str[16];
         int curr_powermode = hdd_powermode(dev_name, curr_powermode_str, 16);
 
-        fprintf(stdout, "%45s (/dev/%s): (%d) %s\n", s->hdd_identity, dev_name, curr_powermode, curr_powermode_str);
+        uint64_t ssc = 0;
+        uint64_t lcc = 0;
+        hdd_get_ssc_lcc(dev_name, &ssc, &lcc);
+
+        fprintf(stdout, "%45s (/dev/%s): (%d) %s, Start_Stop_Count = %llu, Load_Cycle_Count = %llu\n", s->hdd_identity, dev_name, curr_powermode, curr_powermode_str, ssc, lcc);
+
         s = s->_next;
     }
 }
@@ -512,6 +603,10 @@ void load_conf() {
                     _v = cfg.standby_default;
                 }
                 curr->standby = _v;
+
+            } else if (token_i == 4) {
+                if (token[0] == '1') curr->enable_protect_lcc = 1;
+
             }
 
             token = strtok(NULL, " \t");
@@ -616,12 +711,15 @@ void wakeup_loop() {
                     char * curr_identity = s->hdd_identity;
                     char * curr_devname = identity_dev_name(curr_identity);
 
+                    uint64_t lcc = 0;
+                    hdd_get_ssc_lcc(curr_devname, NULL, &lcc);
+
                     char curr_powermode_str[16];
                     int curr_powermode = hdd_powermode(curr_devname, curr_powermode_str, 16);
-                    logger("Checking %s (/dev/%s), current powermode: (%d) %s\n", curr_identity, curr_devname, curr_powermode, curr_powermode_str);
+                    logger("Checking %s (/dev/%s), current powermode: (%d) %s, Load_Cycle_Count: %llu\n", curr_identity, curr_devname, curr_powermode, curr_powermode_str, lcc);
 
-                    if (curr_powermode != 1) {
-                        if (cfg._t > 0) {
+                    if (cfg._t > 0) {
+                        if ((curr_powermode != 1) || (s->_last_lcc < lcc)) {
                             s->_actual_wakeup_count++;
                             uint32_t __wakeup_timer_orin = s->wakeup_timer;
                             s->wakeup_timer *= 0.75;
@@ -630,6 +728,7 @@ void wakeup_loop() {
                             update_db();
                         }
                     }
+                    s->_last_lcc = lcc;
 
                     hdd_wake1(curr_devname);
 
@@ -637,6 +736,7 @@ void wakeup_loop() {
                     logger("actual_wakeup_count on %s (/dev/%s) reached max protected limit: %u\n, for your HDD safety, nothing will be done then. It seems that your device is not suitable to use hdwake. Or you may want to delete the line on DB file to retry\n");
                 }
             }
+
             s = s->_next;
         }
 
@@ -653,6 +753,11 @@ void init_apm_standby() {
         logger("%s (/dev/%s):\n", curr_identity, curr_devname);
         hdd_set_apmmode(curr_devname, s->apm);
         hdd_set_standby(curr_devname, s->standby);
+        if (s->enable_protect_lcc) {
+            logger(" Protect LCC enabled\n");
+        } else {
+            logger(" Protect LCC disabled\n");
+        }
         s = s->_next;
     }
 }
@@ -702,7 +807,7 @@ int action_run(int argc, char ** argv, int _argc, char ** _argv) {
     }
 
     memset(&cfg, 0, sizeof(struct Cfg));
-    cfg.wakeup_timer_min = 30;
+    cfg.wakeup_timer_min = 10;
     cfg.wakeup_timer_default = 10 * 60;
     cfg.wakeup_count_protected_max = 128;
     cfg.identity_refresh_interval = 5 * 60;
@@ -763,6 +868,9 @@ int main(int argc, char ** argv, char ** env) {
 
     } else if (!strcmp(argv[1], "run")) {
         action = 2;
+
+    } else if (!strcmp(argv[1], "debug")) {
+        _get_hdd_smart("sdc");
 
     } else {
         usage();
